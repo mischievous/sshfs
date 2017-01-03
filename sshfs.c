@@ -14,6 +14,7 @@
 #include <fuse_lowlevel.h>
 #ifdef __APPLE__
 #  include <fuse_darwin.h>
+#  include <sys/sysctl.h>
 #endif
 #include <assert.h>
 #include <stdio.h>
@@ -260,6 +261,8 @@ struct sshfs {
 #ifdef __APPLE__
 	unsigned remote_gid;
 	unsigned local_gid;
+
+    unsigned sierra_workaround;
 #endif
 	int remote_uid_detected;
 	unsigned blksize;
@@ -427,6 +430,14 @@ static struct fuse_opt workaround_opts[] = {
 	SSHFS_OPT("nobuflimit", buflimit_workaround, 0),
 	SSHFS_OPT("fstat",      fstat_workaround, 1),
 	SSHFS_OPT("nofstat",    fstat_workaround, 0),
+
+#ifdef __APPLE__
+    SSHFS_OPT("none",       sierra_workaround, 0),
+    SSHFS_OPT("all",        sierra_workaround, 1),
+    SSHFS_OPT("sierra",     sierra_workaround, 1),
+    SSHFS_OPT("nosierra",   sierra_workaround, 0),
+#endif
+
 	FUSE_OPT_END
 };
 
@@ -604,7 +615,7 @@ static inline void buf_add_uint64(struct buffer *buf, uint64_t val)
 
 static inline void buf_add_data(struct buffer *buf, const struct buffer *data)
 {
-	buf_add_uint32(buf, data->len);
+	buf_add_uint32(buf, (uint32_t) data->len);
 	buf_add_mem(buf, data->p, data->len);
 }
 
@@ -820,15 +831,15 @@ static int buf_get_statvfs(struct buffer *buf, struct statvfs *stbuf)
 	}
 
 	memset(stbuf, 0, sizeof(struct statvfs));
-	stbuf->f_bsize = bsize;
+	stbuf->f_bsize  = bsize;
 	stbuf->f_frsize = frsize;
-	stbuf->f_blocks = blocks;
-	stbuf->f_bfree = bfree;
-	stbuf->f_bavail = bavail;
-	stbuf->f_files = files;
-	stbuf->f_ffree = ffree;
-	stbuf->f_favail = favail;
-	stbuf->f_namemax = namemax;
+	stbuf->f_blocks  = (unsigned int) blocks;
+	stbuf->f_bfree   = (unsigned int) bfree;
+	stbuf->f_bavail  = (unsigned int) bavail;
+	stbuf->f_files   = (unsigned int)files;
+	stbuf->f_ffree   = (unsigned int)ffree;
+	stbuf->f_favail  = (unsigned int)favail;
+	stbuf->f_namemax = (unsigned int) namemax;
 
 	return 0;
 }
@@ -959,7 +970,7 @@ static int pty_expect_loop(void)
 	char buf[256];
 	const char *passwd_str = "assword:";
 	int timeout = 60 * 1000; /* 1min timeout for the prompt to appear */
-	int passwd_len = strlen(passwd_str);
+	int passwd_len = (int) strlen(passwd_str);
 	int len = 0;
 	char c;
 
@@ -989,7 +1000,7 @@ static int pty_expect_loop(void)
 			break;
 		}
 
-		res = read(sshfs.ptyfd, &c, 1);
+		res = (int) read(sshfs.ptyfd, &c, 1);
 		if (res == -1) {
 			perror("read");
 			return -1;
@@ -1216,7 +1227,7 @@ static int do_write(struct iovec *iov, size_t count)
 {
 	int res;
 	while (count) {
-		res = writev(sshfs.wfd, iov, count);
+		res = (int) writev(sshfs.wfd, iov, (int) count);
 		if (res == -1) {
 			perror("write");
 			return -1;
@@ -1274,7 +1285,7 @@ static int sftp_send_iov(uint8_t type, uint32_t id, struct iovec iov[],
 
 	assert(count <= SFTP_MAX_IOV - 1);
 	buf_init(&buf, 9);
-	buf_add_uint32(&buf, iov_length(iov, count) + 5);
+	buf_add_uint32(&buf, (int) iov_length(iov, count) + 5);
 	buf_add_uint8(&buf, type);
 	buf_add_uint32(&buf, id);
 	buf_to_iov(&buf, &iovout[nout++]);
@@ -1293,7 +1304,7 @@ static int do_read(struct buffer *buf)
 	uint8_t *p = buf->p;
 	size_t size = buf->size;
 	while (size) {
-		res = read(sshfs.rfd, p, size);
+		res = (int) read(sshfs.rfd, p, size);
 		if (res == -1) {
 			perror("read");
 			return -1;
@@ -1417,7 +1428,7 @@ static int process_one_request(void)
 		if (sshfs.debug) {
 			struct timeval now;
 			unsigned int difftime;
-			unsigned msgsize = buf.size + 5;
+			unsigned msgsize = (unsigned int) buf.size + 5;
 
 			gettimeofday(&now, NULL);
 			difftime = (now.tv_sec - req->start.tv_sec) * 1000;
@@ -2491,8 +2502,8 @@ static int sshfs_utime(const char *path, struct utimbuf *ubuf)
 	buf_init(&buf, 0);
 	buf_add_path(&buf, path);
 	buf_add_uint32(&buf, SSH_FILEXFER_ATTR_ACMODTIME);
-	buf_add_uint32(&buf, ubuf->actime);
-	buf_add_uint32(&buf, ubuf->modtime);
+	buf_add_uint32(&buf, (uint32_t) ubuf->actime);
+	buf_add_uint32(&buf, (uint32_t) ubuf->modtime);
 	err = sftp_request(SSH_FXP_SETSTAT, &buf, SSH_FXP_STATUS, NULL);
 	buf_free(&buf);
 	return err;
@@ -2550,7 +2561,7 @@ static int sshfs_open_common(const char *path, mode_t mode,
 	sf->refs = 1;
 	sf->next_pos = 0;
 	pthread_mutex_lock(&sshfs.lock);
-	sf->modifver= sshfs.modifver;
+	sf->modifver= (int) sshfs.modifver;
 	sf->connver = sshfs.connver;
 	pthread_mutex_unlock(&sshfs.lock);
 	buf_init(&buf, 0);
@@ -2735,7 +2746,7 @@ static struct read_chunk *sshfs_send_read(struct sshfs_file *sf, size_t size,
 		buf_init(&buf, 0);
 		buf_add_buf(&buf, handle);
 		buf_add_uint64(&buf, offset);
-		buf_add_uint32(&buf, bsize);
+		buf_add_uint32(&buf, (uint32_t) bsize);
 		buf_to_iov(&buf, &iov[0]);
 		err = sftp_request_send(SSH_FXP_READ, iov, 1,
 					sshfs_read_begin,
@@ -2775,7 +2786,7 @@ static int wait_chunk(struct read_chunk *chunk, char *buf, size_t size)
 		rreq = list_entry(chunk->reqs.prev, struct read_req, list);
 
 		if (rreq->res < 0) {
-			chunk->sio.error = rreq->res;
+			chunk->sio.error = (int) rreq->res;
 			break;
 		} if (rreq->res == 0) {
 			chunk->sio.error = MY_EOF;
@@ -2858,7 +2869,7 @@ static int sshfs_async_read(struct sshfs_file *sf, char *rbuf, size_t size,
 	curr_is_seq = sf->is_seq;
 	sf->is_seq = (sf->next_pos == offset && sf->modifver == sshfs.modifver);
 	sf->next_pos = offset + size;
-	sf->modifver = sshfs.modifver;
+	sf->modifver = (int) sshfs.modifver;
 	chunk = search_read_chunk(sf, offset);
 	pthread_mutex_unlock(&sshfs.lock);
 
@@ -2891,7 +2902,7 @@ static int sshfs_async_read(struct sshfs_file *sf, char *rbuf, size_t size,
 	if (res < 0)
 		return res;
 
-	return total;
+	return (int) total;
 }
 
 static int sshfs_read(const char *path, char *rbuf, size_t size, off_t offset,
@@ -2951,7 +2962,7 @@ static int sshfs_async_write(struct sshfs_file *sf, const char *wbuf,
 		buf_init(&buf, 0);
 		buf_add_buf(&buf, handle);
 		buf_add_uint64(&buf, offset);
-		buf_add_uint32(&buf, bsize);
+		buf_add_uint32(&buf, (uint32_t) bsize);
 		buf_to_iov(&buf, &iov[0]);
 		iov[1].iov_base = (void *) wbuf;
 		iov[1].iov_len = bsize;
@@ -3011,7 +3022,7 @@ static int sshfs_sync_write(struct sshfs_file *sf, const char *wbuf,
 		buf_init(&buf, 0);
 		buf_add_buf(&buf, handle);
 		buf_add_uint64(&buf, offset);
-		buf_add_uint32(&buf, bsize);
+		buf_add_uint32(&buf, (uint32_t) bsize);
 		buf_to_iov(&buf, &iov[0]);
 		iov[1].iov_base = (void *) wbuf;
 		iov[1].iov_len = bsize;
@@ -3357,6 +3368,15 @@ static struct fuse_cache_operations sshfs_oper = {
 
 static void usage(const char *progname)
 {
+    char sierra[256];
+
+#ifdef __APPLE__
+    snprintf (sierra, sizeof (sierra), "[no]sierra       fix for osx sierra (default: %s)\n", sshfs.sierra_workaround ? "yes":"no");
+#else
+    snprintf (sierra, sizeof (sierra), "");
+#endif
+
+
 	printf(
 "usage: %s [user@]host:[dir] mountpoint [options]\n"
 "\n"
@@ -3396,6 +3416,7 @@ static void usage(const char *progname)
 "             [no]nodelaysrv   set nodelay tcp flag in sshd (default: off)\n"
 "             [no]truncate     fix truncate for old servers (default: off)\n"
 "             [no]buflimit     fix buffer fillup bug in server (default: on)\n"
+"             %s\n"
 "    -o idmap=TYPE          user/group ID mapping (default: " IDMAP_DEFAULT ")\n"
 "             none             no translation of the ID space\n"
 "             user             only translate UID/GID of connecting user\n"
@@ -3416,7 +3437,7 @@ static void usage(const char *progname)
 "    -o no_check_root       don't check for existence of 'dir' on server\n"
 "    -o password_stdin      read password from stdin (only for pam_mount!)\n"
 "    -o SSHOPT=VAL          ssh options (see man ssh_config)\n"
-"\n", progname);
+"\n", progname, sierra);
 }
 
 static int is_ssh_opt(const char *arg)
@@ -3934,6 +3955,15 @@ int main(int argc, char *argv[])
 	sshfs.nodelaysrv_workaround = 0;
 #ifdef __APPLE__
 	sshfs.rename_workaround = 1;
+
+    //
+    char osxversion[256];
+    size_t size = sizeof(osxversion);
+    sysctlbyname("kern.osrelease", osxversion, &size, NULL, 0);
+
+    //
+    sshfs.sierra_workaround = atoi (osxversion) >= 16 ? 1:0;
+
 #else
 	sshfs.rename_workaround = 0;
 #endif
@@ -4091,6 +4121,20 @@ int main(int argc, char *argv[])
 			foreground = 1;
 		}
 
+#ifdef __APPLE__
+        // Bloody apple!
+        if (sshfs.sierra_workaround)
+        {
+            ch = fuse_mount(mountpoint, &args);
+            if (!ch)
+            {
+                perror(mountpoint);
+                exit(1);
+            }
+        }
+#endif
+
+        //
 		res = stat(mountpoint, &st);
 		if (res == -1) {
 			perror(mountpoint);
@@ -4098,9 +4142,21 @@ int main(int argc, char *argv[])
 		}
 		sshfs.mnt_mode = st.st_mode;
 
-		ch = fuse_mount(mountpoint, &args);
-		if (!ch)
-			exit(1);
+
+// Bloody apple!  So if this is apple and sierra_workaround == 0 then perform the fure_mount.
+//     protect the fuse_mount in {}.
+#ifdef __APPLE__
+        if (!sshfs.sierra_workaround)
+        {
+#endif
+        ch = fuse_mount(mountpoint, &args);
+        if (!ch)
+            exit(1);
+
+#ifdef __APPLE__
+        }
+#endif
+
 
 		res = fcntl(fuse_chan_fd(ch), F_SETFD, FD_CLOEXEC);
 		if (res == -1)
