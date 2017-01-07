@@ -4110,6 +4110,8 @@ int main(int argc, char *argv[])
 		int multithreaded;
 		int foreground;
 		struct stat st;
+		int useStat = 1;
+
 
 		res = fuse_parse_cmdline(&args, &mountpoint, &multithreaded,
 					 &foreground);
@@ -4122,40 +4124,29 @@ int main(int argc, char *argv[])
 		}
 
 #ifdef __APPLE__
-        // Bloody apple!
+        // default mount mode
+        st.st_mode = 0x41ed;
         if (sshfs.sierra_workaround)
+            useStat = 0;
+#endif
+
+        //
+        if (useStat)
         {
-            ch = fuse_mount(mountpoint, &args);
-            if (!ch)
+            res = stat(mountpoint, &st);
+            if (res == -1)
             {
                 perror(mountpoint);
                 exit(1);
             }
         }
-#endif
 
         //
-		res = stat(mountpoint, &st);
-		if (res == -1) {
-			perror(mountpoint);
-			exit(1);
-		}
 		sshfs.mnt_mode = st.st_mode;
 
-
-// Bloody apple!  So if this is apple and sierra_workaround == 0 then perform the fure_mount.
-//     protect the fuse_mount in {}.
-#ifdef __APPLE__
-        if (!sshfs.sierra_workaround)
-        {
-#endif
-        ch = fuse_mount(mountpoint, &args);
-        if (!ch)
-            exit(1);
-
-#ifdef __APPLE__
-        }
-#endif
+		ch = fuse_mount(mountpoint, &args);
+		if (!ch)
+			exit(1);
 
 
 		res = fcntl(fuse_chan_fd(ch), F_SETFD, FD_CLOEXEC);
